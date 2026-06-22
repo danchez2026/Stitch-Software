@@ -1,0 +1,21 @@
+{
+  "objective": ">32x",
+  "overlap_pct": 20.0,
+  "overscan_pct": 0.0,
+  "settle_time": 5.0,
+  "gain_db": 1.7000000000000004,
+  "exposure_ms": 2.0,
+  "brightness": 16.0,
+  "contrast": 1.0,
+  "gamma": 1.5999999999999996,
+  "auto_levels": false,
+  "clahe": false,
+  "apply_corrections_to_tiles": false,
+  "invert_x": false,
+  "invert_y": false,
+  "speed": "Fast",
+  "com_port": "COM3",
+  "cam_index": "1",
+  "output_folder": "P:/Products/Huawei Mate80 Pro Max/TOPMETAL",
+  "file_name": "KIRIN_9030_TOPMETAL_32x"
+}

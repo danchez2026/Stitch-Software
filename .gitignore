@@ -1,0 +1,33 @@
+# =====================================================================
+#  Do-NOT-upload list for the MAC2000 Tile Scanner repo.
+#  GitHub is for source code, not large data / binaries / outputs.
+# =====================================================================
+
+# --- Large data & scan outputs (these are RESULTS, not source) ---
+scan_output/
+bit test/
+Bit test color bug/
+
+# --- Bundled Python runtime / virtual environments ---
+python/
+.venv/
+venv/
+env/
+
+# --- Vendor camera SDK installer (large; distributed separately) ---
+TeliCamSDK_Installer/
+
+# --- Large test capture images ---
+test_cam0.png
+test_cam1.png
+
+# --- Python build/cache junk ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+
+# --- Windows junk ---
+Thumbs.db
+desktop.ini
+*.lnk

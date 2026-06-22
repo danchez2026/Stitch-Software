@@ -1,0 +1,21 @@
+{
+  "objective": "32x",
+  "overlap_pct": 20.0,
+  "overscan_pct": 10.0,
+  "settle_time": 5.0,
+  "gain_db": 1.0212765957446808,
+  "exposure_ms": 8.962765957446809,
+  "brightness": 0.0,
+  "contrast": 1.0,
+  "gamma": 1.0,
+  "auto_levels": false,
+  "clahe": false,
+  "apply_corrections_to_tiles": false,
+  "invert_x": false,
+  "invert_y": false,
+  "speed": "Fast",
+  "com_port": "COM3",
+  "cam_index": "1",
+  "output_folder": "P:/Products/Andrew_Test",
+  "file_name": "32x test"
+}
