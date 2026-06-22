@@ -691,11 +691,13 @@ class TeliCamera:
             raw = data[:pixels].reshape(h, w)
             try:
                 import cv2
+                # OpenCV Bayer naming quirk: ..2BGR yields true RGB for a
+                # PFNC-named sensor (..2RGB would swap R<->B). See _get_bayer_code.
                 bayer_map = {
-                    PXL_FMT_BAYERGR8: cv2.COLOR_BAYER_GR2RGB,
-                    PXL_FMT_BAYERRG8: cv2.COLOR_BAYER_RG2RGB,
-                    PXL_FMT_BAYERGB8: cv2.COLOR_BAYER_GB2RGB,
-                    PXL_FMT_BAYERBG8: cv2.COLOR_BAYER_BG2RGB,
+                    PXL_FMT_BAYERGR8: cv2.COLOR_BAYER_GR2BGR,
+                    PXL_FMT_BAYERRG8: cv2.COLOR_BAYER_RG2BGR,
+                    PXL_FMT_BAYERGB8: cv2.COLOR_BAYER_GB2BGR,
+                    PXL_FMT_BAYERBG8: cv2.COLOR_BAYER_BG2BGR,
                 }
                 return cv2.cvtColor(raw, bayer_map[fmt])
             except ImportError:
@@ -707,11 +709,12 @@ class TeliCamera:
             raw16 = raw16.astype(np.uint16) << 4  # 12-bit → 16-bit range
             try:
                 import cv2
+                # ..2BGR yields true RGB for a PFNC-named sensor. See _get_bayer_code.
                 bayer_map_12 = {
-                    PXL_FMT_BAYERGR12: cv2.COLOR_BAYER_GR2RGB,
-                    PXL_FMT_BAYERRG12: cv2.COLOR_BAYER_RG2RGB,
-                    PXL_FMT_BAYERGB12: cv2.COLOR_BAYER_GB2RGB,
-                    PXL_FMT_BAYERBG12: cv2.COLOR_BAYER_BG2RGB,
+                    PXL_FMT_BAYERGR12: cv2.COLOR_BAYER_GR2BGR,
+                    PXL_FMT_BAYERRG12: cv2.COLOR_BAYER_RG2BGR,
+                    PXL_FMT_BAYERGB12: cv2.COLOR_BAYER_GB2BGR,
+                    PXL_FMT_BAYERBG12: cv2.COLOR_BAYER_BG2BGR,
                 }
                 return cv2.cvtColor(raw16, bayer_map_12[fmt])
             except ImportError:
@@ -722,7 +725,8 @@ class TeliCamera:
             raw16 = raw16.astype(np.uint16) << 6  # 10-bit → 16-bit range
             try:
                 import cv2
-                return cv2.cvtColor(raw16, cv2.COLOR_BAYER_GR2RGB)
+                # ..2BGR yields true RGB for a PFNC-named sensor. See _get_bayer_code.
+                return cv2.cvtColor(raw16, cv2.COLOR_BAYER_GR2BGR)
             except ImportError:
                 return raw16
         else:
@@ -1356,16 +1360,24 @@ class TeliCamera:
         return 0.0
 
     def _get_bayer_code(self):
-        """Get the OpenCV Bayer demosaicing code for the detected pattern."""
+        """Get the OpenCV Bayer demosaicing code for the detected pattern.
+
+        NOTE on OpenCV's Bayer naming quirk: cv2.COLOR_BAYER_<X>2RGB is an
+        alias for COLOR_BAYER_<complement>2BGR, so debayering a PFNC "BayerX"
+        sensor with COLOR_BAYER_X2RGB actually yields a BGR-ordered array
+        (red and blue channels swapped). The name-matching COLOR_BAYER_X2BGR
+        constant is the one that produces a true RGB array (channel0 = Red)
+        for a PFNC "BayerX" sensor.
+        """
         import cv2
         bayer_map = {
-            "BayerBG": cv2.COLOR_BAYER_BG2RGB,
-            "BayerGR": cv2.COLOR_BAYER_GR2RGB,
-            "BayerRG": cv2.COLOR_BAYER_RG2RGB,
-            "BayerGB": cv2.COLOR_BAYER_GB2RGB,
+            "BayerBG": cv2.COLOR_BAYER_BG2BGR,
+            "BayerGR": cv2.COLOR_BAYER_GR2BGR,
+            "BayerRG": cv2.COLOR_BAYER_RG2BGR,
+            "BayerGB": cv2.COLOR_BAYER_GB2BGR,
         }
         pattern = getattr(self, '_bayer_pattern', None) or "BayerBG"
-        return bayer_map.get(pattern, cv2.COLOR_BAYER_BG2RGB)
+        return bayer_map.get(pattern, cv2.COLOR_BAYER_BG2BGR)
 
     def get_bit_depth(self) -> int:
         """Get the active capture bit depth (8, 10, or 12)."""
