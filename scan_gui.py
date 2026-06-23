@@ -9,7 +9,7 @@ Workflow:
     3. Navigate to the opposite corner → click "Mark Corner 2"
     4. Software calculates bounding box + overscan margin
     5. Review scan preview (grid size, total tiles, estimated time)
-    6. Click "Start Scan" — serpentine capture with TIFF output
+    6. Click "Start Scan" — typewriter (left-to-right raster) capture with TIFF output
     7. Outputs: tiles, scan_metadata.json, TileConfiguration.txt
 
 Usage:
@@ -1707,10 +1707,8 @@ class TileScanGUI:
 
         tile_index = 0
         for row in range(rows):
-            if row % 2 == 0:
-                col_range = range(cols)
-            else:
-                col_range = range(cols - 1, -1, -1)
+            # Typewriter (raster): every row scans left-to-right
+            col_range = range(cols)
 
             for col in col_range:
                 if self._abort_scan:
@@ -2035,11 +2033,8 @@ class TileScanGUI:
 
         tile_index = 0
         for row in range(rows):
-            # Serpentine: reverse column order on odd rows
-            if row % 2 == 0:
-                col_range = range(cols)
-            else:
-                col_range = range(cols - 1, -1, -1)
+            # Typewriter (raster): every row scans left-to-right
+            col_range = range(cols)
 
             for col in col_range:
                 if self._abort_scan:
@@ -2242,7 +2237,7 @@ class TileScanGUI:
                 "origin_x_steps": params["origin_x"],
                 "origin_y_steps": params["origin_y"],
                 "settle_time": params["settle_time"],
-                "pattern": "serpentine",
+                "pattern": "typewriter",
                 "die_corners_steps": {
                     "UL": list(self.corner_ul) if self.corner_ul else None,
                     "UR": list(self.corner_ur) if self.corner_ur else None,
