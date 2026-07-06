@@ -24,6 +24,7 @@ Simulated mode (no hardware needed):
     stage.connect()  # Works without actual serial port
 """
 
+import re
 import serial
 import time
 import logging
@@ -160,21 +161,28 @@ class MAC2000:
             )
             time.sleep(self.POST_OPEN_DELAY)
 
-            # Drain any startup data
-            if self._serial.in_waiting:
+            # Drain any startup data (loop until quiet — the controller or
+            # a previous session may still be streaming a stale reply)
+            while self._serial.in_waiting:
                 self._serial.read(self._serial.in_waiting)
+                time.sleep(0.05)
 
             self._connected = True
             logger.info(f"MAC 2000 connected on {self.port}")
 
-            # Try to get version to confirm communication
-            try:
-                version = self.get_version()
-                logger.info(f"Firmware: {version}")
-                return version
-            except Exception:
-                logger.warning("Connected but could not read version")
-                return "Connected (version unknown)"
+            # Confirm communication; retry once after a resync since the
+            # first exchange after opening the port can hit leftover bytes
+            for attempt in range(2):
+                try:
+                    version = self.get_version()
+                    logger.info(f"Firmware: {version}")
+                    return version
+                except Exception as e:
+                    logger.warning(
+                        f"Version read attempt {attempt + 1} failed: {e}")
+                    self._resync()
+            logger.warning("Connected but could not read version")
+            return "Connected (version unknown)"
 
         except serial.SerialException as e:
             raise CommunicationError(f"Failed to open {self.port}: {e}")
@@ -204,10 +212,14 @@ class MAC2000:
         if not self._serial or not self._serial.is_open:
             raise CommunicationError("Port not open")
 
-        # Drain any leftover data from previous commands
+        # Drain any leftover data from previous commands. Loop until the
+        # line is quiet: a stale reply may still be streaming in, and a
+        # single drain would tear it in half, leaving the remainder to be
+        # misread as this command's response.
         time.sleep(0.05)
-        if self._serial.in_waiting:
+        while self._serial.in_waiting:
             self._serial.read(self._serial.in_waiting)
+            time.sleep(0.03)
 
         if self.char_delay > 0:
             # MAC 2000 requires delay between characters
@@ -228,6 +240,11 @@ class MAC2000:
 
         We read until we see ':A' or ':N' followed by '\\n',
         collecting everything as the full response.
+
+        Raises CommunicationError if the response never completes within
+        the timeout — a partial (torn) response must NEVER be returned,
+        because callers would parse it as valid-but-wrong data
+        (e.g. ':A 103' from 'WHERE X Y' would become position x=103).
         """
         if not self._serial or not self._serial.is_open:
             raise CommunicationError("Port not open")
@@ -235,6 +252,7 @@ class MAC2000:
         actual_timeout = timeout or self.timeout
         end_time = time.time() + actual_timeout
         response = b""
+        complete = False
 
         while time.time() < end_time:
             if self._serial.in_waiting > 0:
@@ -245,6 +263,7 @@ class MAC2000:
 
                 # STATUS returns just B or N
                 if decoded.strip() in ("B", "N"):
+                    complete = True
                     break
 
                 # Look for ':A' or ':N' followed by newline (the final response)
@@ -254,6 +273,7 @@ class MAC2000:
                     last_colon = max(decoded.rfind(":A"), decoded.rfind(":N"))
                     after_colon = decoded[last_colon:]
                     if "\n" in after_colon or "\r" in after_colon:
+                        complete = True
                         break
                     # Keep reading for the rest of the line
                     time.sleep(0.05)
@@ -273,7 +293,37 @@ class MAC2000:
 
         decoded = response.decode("ascii", errors="replace").strip()
         logger.debug(f"RX raw: {decoded!r}")
+
+        if not complete:
+            # Torn read: leftover bytes may still arrive. Resync so the
+            # next command doesn't consume this command's stale reply.
+            self._resync()
+            raise CommunicationError(
+                f"Incomplete response from MAC 2000 (got {decoded!r}, "
+                f"timeout={actual_timeout}s)"
+            )
+
         return decoded
+
+    def _resync(self):
+        """
+        Recover a clean command/response boundary after a torn or timed-out
+        exchange: wait for any in-flight reply to finish arriving, then
+        drain everything from the input buffer.
+        """
+        if self.simulate or not self._serial or not self._serial.is_open:
+            return
+        try:
+            deadline = time.time() + 0.5
+            time.sleep(0.1)
+            while time.time() < deadline:
+                waiting = self._serial.in_waiting
+                if not waiting:
+                    break
+                self._serial.read(waiting)
+                time.sleep(0.05)
+        except serial.SerialException as e:
+            logger.warning(f"Resync failed: {e}")
 
     def send_command(self, command: str, timeout: Optional[float] = None) -> str:
         """
@@ -422,23 +472,47 @@ class MAC2000:
 
     # ─── Position Commands ────────────────────────────────────────────
 
-    def get_position(self) -> StagePosition:
+    # Full WHERE X Y reply: exactly two signed integers
+    _WHERE_XY_RE = re.compile(r"^(-?\d+)\s+(-?\d+)$")
+
+    def get_position(self, retries: int = 2) -> StagePosition:
         """
         Get current X,Y position in motor steps.
+
+        Requires BOTH coordinates in the reply. A truncated reply (e.g.
+        ':A 103' torn from ':A 103800 -141191') is rejected and retried —
+        parsing it would silently report a wildly wrong position.
+
+        Parameters
+        ----------
+        retries : int
+            Number of retries after a bad/timed-out reply (default 2)
 
         Returns
         -------
         StagePosition
             Current position with x, y attributes
         """
-        response = self.send_command("WHERE X Y")
-        parts = response.split()
-        if len(parts) >= 2:
-            return StagePosition(x=int(parts[0]), y=int(parts[1]))
-        elif len(parts) == 1:
-            return StagePosition(x=int(parts[0]), y=0)
-        else:
-            raise CommunicationError(f"Invalid WHERE response: {response!r}")
+        last_error: Optional[Exception] = None
+        for attempt in range(retries + 1):
+            try:
+                response = self.send_command("WHERE X Y")
+            except CommunicationError as e:
+                last_error = e
+                continue
+
+            match = self._WHERE_XY_RE.match(response.strip())
+            if match:
+                return StagePosition(x=int(match.group(1)),
+                                     y=int(match.group(2)))
+
+            last_error = CommunicationError(
+                f"Invalid WHERE response: {response!r}")
+            logger.warning(f"get_position attempt {attempt + 1}: {last_error}")
+            self._resync()
+
+        raise CommunicationError(
+            f"get_position failed after {retries + 1} attempts: {last_error}")
 
     def get_position_um(self) -> Tuple[float, float]:
         """Get current position in microns (requires steps_per_um calibration)."""

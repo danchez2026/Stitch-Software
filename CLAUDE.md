@@ -74,8 +74,16 @@ Origin is centered over the die: `origin = die_center - (N-1)*step/2`. This make
 - `_SOFTWARE\MAC2000 Image Software_3-12-26\` — March 12, 2026 backup (excludes scan_output)
 
 ## Known Issues
-- Click-to-drive has serial collision issues with position polling (unresolved)
 - pytelicam rewrite needs camera-connected testing on lab PC
+
+## Fixed Issues
+- Stage "lost position" / corner check way off (fixed in stage-loss-fix):
+  torn serial reads let a truncated `WHERE` reply (e.g. `:A 103` from
+  `:A 103800 -141191`) be parsed as a valid position. Driver now rejects
+  incomplete responses, resyncs the serial line after timeouts, retries
+  `WHERE` with strict two-integer validation, and the GUI refuses to mark
+  a corner from a failed position read. Verified against hardware with
+  `test_stage_loss_fix.py` (requires stage on COM3).
 
 ---
 
