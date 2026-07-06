@@ -1279,8 +1279,18 @@ class TileScanGUI:
             return
 
         def _do_mark():
-            with self._stage_lock:
-                pos = self.stage.get_position()
+            try:
+                with self._stage_lock:
+                    pos = self.stage.get_position()
+            except Exception as e:
+                # Never mark a corner from a failed/garbled position read —
+                # a wrong corner silently corrupts the whole scan area.
+                print(f"Mark corner error: {e}")
+                self.root.after(0, lambda: messagebox.showerror(
+                    "Mark Corner Failed",
+                    f"Could not read stage position:\n{e}\n\n"
+                    "Corner NOT marked. Try again."))
+                return
             corner = (pos.x, pos.y)
             um_x = pos.x / self.steps_per_um
             um_y = pos.y / self.steps_per_um
