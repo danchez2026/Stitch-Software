@@ -1378,32 +1378,49 @@ class TileScanGUI:
             return
 
         def _do_check():
-            for name, (cx, cy) in corners:
-                self.root.after(0, lambda n=name: self.lbl_scan_status.config(
-                    text=f"Corner Check: driving to {n}..."))
+            # A drifting joystick pot overrides serial X/Y moves — disable
+            # joystick input for the duration of the automated sequence.
+            with self._stage_lock:
+                try:
+                    self.stage.set_joystick(False)
+                except Exception as e:
+                    print(f"Joystick disable error: {e}")
+            try:
+                self._corner_check_loop(corners)
+            finally:
                 with self._stage_lock:
                     try:
-                        self.stage.move_absolute(cx, cy, wait=False)
+                        self.stage.set_joystick(True)
                     except Exception as e:
-                        print(f"Corner check move error: {e}")
-                        continue
-                # Wait for arrival
-                for _ in range(300):  # up to 60 seconds
-                    time.sleep(0.2)
-                    with self._stage_lock:
-                        try:
-                            if not self.stage.is_busy():
-                                break
-                        except Exception:
-                            pass
-                self.root.after(0, lambda n=name: self.lbl_scan_status.config(
-                    text=f"Corner Check: at {n} — verify in preview"))
-                time.sleep(2.0)  # pause for visual verification
+                        print(f"Joystick re-enable error: {e}")
 
             self.root.after(0, lambda: self.lbl_scan_status.config(
                 text="Corner Check complete"))
 
         threading.Thread(target=_do_check, daemon=True).start()
+
+    def _corner_check_loop(self, corners):
+        for name, (cx, cy) in corners:
+            self.root.after(0, lambda n=name: self.lbl_scan_status.config(
+                text=f"Corner Check: driving to {n}..."))
+            with self._stage_lock:
+                try:
+                    self.stage.move_absolute(cx, cy, wait=False)
+                except Exception as e:
+                    print(f"Corner check move error: {e}")
+                    continue
+            # Wait for arrival
+            for _ in range(300):  # up to 60 seconds
+                time.sleep(0.2)
+                with self._stage_lock:
+                    try:
+                        if not self.stage.is_busy():
+                            break
+                    except Exception:
+                        pass
+            self.root.after(0, lambda n=name: self.lbl_scan_status.config(
+                text=f"Corner Check: at {n} — verify in preview"))
+            time.sleep(2.0)  # pause for visual verification
 
     def _get_scan_bounds(self):
         """Get the scan bounding box from marked corners.
@@ -1734,10 +1751,12 @@ class TileScanGUI:
         self.root.after(0, self._init_mosaic, params)
         time.sleep(0.3)
 
-        # Set scan speed
+        # Set scan speed; disable joystick so a drifting pot can't
+        # override the serial MOVE commands mid-scan
         try:
             self.stage.set_speed(50000)
             time.sleep(0.1)
+            self.stage.set_joystick(False)
         except Exception:
             pass
 
@@ -1923,6 +1942,10 @@ class TileScanGUI:
                 progress=100,
             )
 
+        try:
+            self.stage.set_joystick(True)
+        except Exception:
+            pass
         self._scanning = False
         self._step_focus_mode = False
         self._unlock_camera_settings()
@@ -2060,10 +2083,13 @@ class TileScanGUI:
         self.root.after(0, self._init_mosaic, params)
         time.sleep(0.3)  # let mosaic render
 
-        # Set scan speed — not too fast to avoid serial issues
+        # Set scan speed — not too fast to avoid serial issues.
+        # Disable joystick so a drifting pot can't override the serial
+        # MOVE commands mid-scan.
         try:
             self.stage.set_speed(50000)
             time.sleep(0.1)
+            self.stage.set_joystick(False)
         except Exception:
             pass
 
@@ -2217,6 +2243,10 @@ class TileScanGUI:
                 progress=100,
             )
 
+        try:
+            self.stage.set_joystick(True)
+        except Exception:
+            pass
         self._scanning = False
         self._unlock_camera_settings()
         self.root.after(0, lambda: self.btn_scan.config(state=tk.NORMAL))

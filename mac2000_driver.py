@@ -724,6 +724,20 @@ class MAC2000:
         """Emergency stop - immediately halt all motor movement."""
         self.send_command("HALT")
 
+    def set_joystick(self, enabled: bool):
+        """
+        Enable or disable the physical joystick input for X and Y.
+
+        A mis-centered/dirty joystick pot continuously drives an axis and
+        OVERRIDES serial motion commands on that axis (the controller
+        acknowledges MOVE/MOVREL with :A but never executes the move).
+        Disable the joystick around automated move sequences (corner
+        check, tile scans) and re-enable it afterwards so the user keeps
+        manual navigation.
+        """
+        arg = "+" if enabled else "-"
+        self.send_command(f"JOYSTICK X{arg} Y{arg}")
+
     # ─── Speed & Acceleration ─────────────────────────────────────────
 
     def set_speed(self, x_speed: int, y_speed: Optional[int] = None):
