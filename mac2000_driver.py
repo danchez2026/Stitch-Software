@@ -148,6 +148,7 @@ class MAC2000:
 
         self._serial: Optional[serial.Serial] = None
         self._connected = False
+        self._last_reconnect_attempt = 0.0
 
         # Simulation state
         self._sim_pos = StagePosition(0, 0)
@@ -244,6 +245,7 @@ class MAC2000:
         Re-resolves the COM port in case Windows renumbered it.
         """
         logger.info("Attempting reconnect...")
+        self._last_reconnect_attempt = time.time()
         try:
             self.disconnect()
         except Exception:
@@ -431,7 +433,17 @@ class MAC2000:
             return self._simulate_command(command)
 
         if not self._connected:
-            raise CommunicationError("Not connected")
+            # A previous reconnect may have failed while the USB adapter
+            # was still unplugged. Keep trying (rate-limited) so the
+            # session heals itself once the adapter is back, instead of
+            # staying dead until an app restart.
+            if time.time() - self._last_reconnect_attempt < 2.0:
+                raise CommunicationError("Not connected")
+            self._last_reconnect_attempt = time.time()
+            try:
+                self.reconnect()
+            except Exception as e:
+                raise CommunicationError(f"Not connected (retry failed: {e})")
 
         try:
             return self._exchange(command, timeout)
