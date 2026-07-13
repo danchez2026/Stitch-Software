@@ -661,9 +661,20 @@ class TileScanGUI:
         try:
             self.stage = MAC2000(port=port)
             self.stage.connect()
+            # Driver may have followed the adapter to a renumbered COM port
+            if self.stage.port != port:
+                port = self.stage.port
+                self.com_var.set(port)
             self.lbl_status.config(text=f"Stage: {port} OK")
         except Exception as e:
+            self.stage = None
             self.lbl_status.config(text=f"Stage error: {e}")
+            messagebox.showerror(
+                "Stage Not Responding",
+                f"Could not establish communication with the MAC2000:\n\n"
+                f"{e}\n\n"
+                f"Check that the controller is powered on and the USB and "
+                f"serial cables are seated, then click Connect again.")
             return
 
         try:
@@ -739,10 +750,25 @@ class TileScanGUI:
             return  # serial busy, skip this poll
         try:
             pos = self.stage.get_position()
+            if getattr(self, "_pos_poll_failures", 0) >= 3:
+                # Recovered (driver auto-reconnect) — clear the warning
+                port = self.stage.port
+                self.root.after(0, lambda: self.lbl_status.config(
+                    text=f"Stage: {port} OK (reconnected)"))
+            self._pos_poll_failures = 0
             self.root.after(0, lambda: self.lbl_pos.config(
                 text=f"Position: {pos.x} , {pos.y}"))
         except Exception as e:
             print(f"Position read error: {e}")
+            # Surface persistent failures instead of silently showing a
+            # stale position while the user thinks everything is fine
+            self._pos_poll_failures = getattr(
+                self, "_pos_poll_failures", 0) + 1
+            if self._pos_poll_failures == 3:
+                self.root.after(0, lambda: self.lbl_pos.config(
+                    text="Position: STAGE NOT RESPONDING"))
+                self.root.after(0, lambda: self.lbl_status.config(
+                    text="Stage connection lost — check USB/power"))
         finally:
             self._stage_lock.release()
 
