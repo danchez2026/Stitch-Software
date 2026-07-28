@@ -44,6 +44,8 @@ from stitcher import Stitcher
 # um_per_pixel = 1000 / px_per_mm. Camera: Teli BU505MCF 2448 x 2048.
 # (Replaces the WILD scope's table - the SMZ1500 now sits on this stand.)
 
+MICROSCOPE_NAME = "SMZ1500"
+
 OBJECTIVES = {
     "0.75x":  {"um_per_pixel": 7.6923, "px_per_mm": 130.0},
     "1x":     {"um_per_pixel": 5.7604, "px_per_mm": 173.6},
@@ -578,6 +580,7 @@ class TileScanGUI:
             return
 
         config = {
+            "microscope": MICROSCOPE_NAME,
             "objective": self.obj_var.get(),
             "overlap_pct": self.overlap_var.get(),
             "overscan_pct": self.overscan_var.get(),
@@ -624,9 +627,20 @@ class TileScanGUI:
             messagebox.showerror("Load Error", str(e))
             return
 
-        # Apply each setting if present in the config
-        if "objective" in config and config["objective"] in OBJECTIVES:
-            self.obj_var.set(config["objective"])
+        # Apply each setting if present in the config.
+        # Objective labels overlap between scopes (e.g. WILD "10x" vs SMZ
+        # "10x" have very different um/px), so only restore the objective
+        # when the config was saved for THIS microscope. Legacy configs
+        # without a "microscope" tag are treated as foreign.
+        if "objective" in config:
+            cfg_scope = config.get("microscope")
+            if cfg_scope == MICROSCOPE_NAME and config["objective"] in OBJECTIVES:
+                self.obj_var.set(config["objective"])
+            else:
+                print(f"[CONFIG] Objective '{config['objective']}' ignored: "
+                      f"config is for '{cfg_scope or 'unknown scope'}', "
+                      f"this build is calibrated for '{MICROSCOPE_NAME}'. "
+                      f"Using {self.obj_var.get()}.")
         if "overlap_pct" in config:
             self.overlap_var.set(config["overlap_pct"])
         if "overscan_pct" in config:
