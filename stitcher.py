@@ -1054,13 +1054,24 @@ class Stitcher:
         gains = np.clip(gains, 0.5, 2.0)
 
         # ── Highlight protection ──
-        # Rescale ALL gains by one global constant so the corrected p99.5
-        # of every tile stays below the dtype ceiling. A global constant
-        # keeps tile-to-tile matching intact; the image is just uniformly
-        # darker and no highlight information is clipped away.
+        # Rescale ALL gains by one global constant so the corrected bright
+        # content of every tile stays below the dtype ceiling. A global
+        # constant keeps tile-to-tile matching intact; the image is just
+        # uniformly darker and no highlight information is clipped away.
+        #
+        # Peaks are measured PER CHANNEL (clipping happens per channel, and
+        # luminance understates e.g. a saturated red) on the 1/8 stack, at
+        # p99.8 with a 1.15x headroom factor: the area-downsampled stack
+        # suppresses narrow bright features, and the headroom compensates.
+        # A high percentile (not the max) is used deliberately so a few
+        # pixels that are already clipped in the source cannot force a
+        # needless global darkening of the whole canvas.
         ceiling = self._dtype_ceiling()
-        hi = np.array([np.percentile(lum[i], 99.5) for i in range(n)])
-        peak_max = float((hi * gains).max())
+        corr = stack
+        if vignette_corr is not None:
+            corr = stack * vc[np.newaxis]
+        hi = np.array([np.percentile(corr[i], 99.8) for i in range(n)])
+        peak_max = float((hi * gains).max()) * 1.15
         if peak_max > 0.98 * ceiling:
             s = 0.98 * ceiling / peak_max
             gains = gains * s
@@ -1452,15 +1463,29 @@ class Stitcher:
         png_path = str(Path(filepath).with_suffix(".png"))
         band_h = 2048
         if h > max_dim or w > max_dim:
+            # downscale band-by-band into a disk-staged buffer so the full
+            # gigapixel memmap is never materialized in RAM
             scale = min(max_dim / h, max_dim / w)
             new_w, new_h = int(w * scale), int(h * scale)
-            small = cv2.resize(np.asarray(mm), (new_w, new_h),
-                               interpolation=cv2.INTER_AREA)
-            if is_color:
-                small = small[:, :, ::-1]
+            swap_path = raw_path + ".png_small.dat"
+            shape = (new_h, new_w, 3) if is_color else (new_h, new_w)
+            small = np.memmap(swap_path, dtype=mm.dtype, mode="w+", shape=shape)
+            out_band = max(256, int(band_h * scale))
+            for oy0 in range(0, new_h, out_band):
+                oy1 = min(new_h, oy0 + out_band)
+                iy0 = int(oy0 / scale)
+                iy1 = min(h, int(np.ceil(oy1 / scale)))
+                band = np.asarray(mm[iy0:iy1])
+                band_small = cv2.resize(band, (new_w, oy1 - oy0),
+                                        interpolation=cv2.INTER_AREA)
+                small[oy0:oy1] = band_small[:, :, ::-1] if is_color else band_small
+                del band, band_small
+            small.flush()
             cv2.imwrite(png_path, small, [cv2.IMWRITE_PNG_COMPRESSION, 3])
             print(f"  PNG preview saved: {png_path} ({new_w}x{new_h})")
             del small
+            gc.collect()
+            os.remove(swap_path)
         else:
             swap_path = raw_path + ".bgr.dat"
             bgr = np.memmap(swap_path, dtype=mm.dtype, mode="w+", shape=mm.shape)

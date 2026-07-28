@@ -43,22 +43,41 @@ def _log(msg):
 
 
 def _open_canvas(path, mode="r"):
-    """Open a stitched canvas as a (possibly memory-mapped) uint16/uint8 array."""
+    """Open a stitched canvas as a uint16/uint8 array.
+
+    Returns (array, is_memmap). When ``is_memmap`` is False the caller is
+    responsible for writing the array back to disk after modifying it.
+    """
     ext = os.path.splitext(path)[1].lower()
     if ext in (".tif", ".tiff"):
         import tifffile
         try:
-            return tifffile.memmap(path, mode=mode)
+            return tifffile.memmap(path, mode=mode), True
         except ValueError:
             # compressed tif cannot be memmapped; load fully
-            return tifffile.imread(path)
+            return tifffile.imread(path), False
     import cv2
     img = cv2.imread(path, cv2.IMREAD_UNCHANGED)
     if img is None:
         raise FileNotFoundError(path)
     if img.ndim == 3 and img.shape[2] == 3:
-        img = img[:, :, ::-1]  # BGR -> RGB
-    return img
+        img = np.ascontiguousarray(img[:, :, ::-1])  # BGR -> RGB
+    return img, False
+
+
+def _write_canvas(canvas, path):
+    """Write an in-RAM canvas back to its source file."""
+    ext = os.path.splitext(path)[1].lower()
+    if ext in (".tif", ".tiff"):
+        import tifffile
+        tifffile.imwrite(path, canvas,
+                         bigtiff=canvas.nbytes > 2_000_000_000)
+    else:
+        import cv2
+        out = canvas[:, :, ::-1] if canvas.ndim == 3 else canvas
+        if not cv2.imwrite(path, out):
+            raise IOError(f"could not write {path}")
+    _log(f"canvas written back -> {path}")
 
 
 def _load_proxy(canvas):
@@ -170,21 +189,31 @@ def main():
 
     base = os.path.splitext(args.image)[0]
     if args.mode == "preview":
-        canvas = _open_canvas(args.image, mode="r")
-        gain, _ = build_gain(canvas, args.pct, args.lo, args.hi,
-                             args.sigma_frac, boost=not args.no_boost)
+        canvas, _ = _open_canvas(args.image, mode="r")
+        gain, _proxy = build_gain(canvas, args.pct, args.lo, args.hi,
+                                  args.sigma_frac, boost=not args.no_boost)
         np.save(base + "_flatten_gain.npy", gain)
         _write_preview(canvas, gain, base + "_flatten_preview.jpg")
     else:
-        canvas = _open_canvas(args.image, mode="r+")
+        canvas, is_memmap = _open_canvas(args.image, mode="r+")
+        expected_shape = (max(2, canvas.shape[0] // DS),
+                          max(2, canvas.shape[1] // DS))
         gain_path = base + "_flatten_gain.npy"
+        gain = None
         if os.path.exists(gain_path):
             gain = np.load(gain_path)
-            _log(f"using saved gain field {gain_path}")
-        else:
-            gain, _ = build_gain(canvas, args.pct, args.lo, args.hi,
-                                 args.sigma_frac, boost=not args.no_boost)
+            if gain.shape != expected_shape:
+                _log(f"saved gain field {gain.shape} does not match canvas "
+                     f"proxy {expected_shape}; recomputing")
+                gain = None
+            else:
+                _log(f"using saved gain field {gain_path}")
+        if gain is None:
+            gain, _proxy = build_gain(canvas, args.pct, args.lo, args.hi,
+                                      args.sigma_frac, boost=not args.no_boost)
         apply_gain(canvas, gain)
+        if not is_memmap:
+            _write_canvas(canvas, args.image)
         _write_preview(canvas, np.ones_like(gain), base + "_flatten_preview.jpg")
     print("DONE", flush=True)
 
