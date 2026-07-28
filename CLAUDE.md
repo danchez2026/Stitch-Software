@@ -77,6 +77,28 @@ Origin is centered over the die: `origin = die_center - (N-1)*step/2`. This make
 - pytelicam rewrite needs camera-connected testing on lab PC
 
 ## Fixed Issues
+- Stage "not responding" / dead session requiring app restart (fixed in
+  stage-reconnect-fix): a USB adapter drop mid-session left the driver
+  holding a dead port handle, and connect() reported success ('Stage: COM3
+  OK') even when the controller never answered the handshake. Driver now
+  hard-fails connect() when the MAC2000 doesn't respond, auto-follows the
+  FTDI adapter (VID 0403 PID 6001) if Windows renumbers the COM port, and
+  auto-reconnects + retries query commands after a mid-session port loss
+  (motion commands are never blindly retried). GUI shows 'STAGE NOT
+  RESPONDING' after 3 failed polls instead of a stale position. Verified
+  with `test_stage_reconnect.py` (requires stage connected).
+- Corner check / scan X axis silently not moving (fixed in
+ joystick-override-fix): the physical joystick's X pot sat slightly
+ off-center, so the controller continuously crept X (~-3 to -4 steps/s
+ while idle) and silently IGNORED serial MOVE/MOVREL commands on X while
+ still acknowledging them with :A (Y worked perfectly). Corner Check
+ drove Y to each corner but left X untouched (~76,000 steps off).
+ Driver gained set_joystick(); Corner Check, Start Scan, and Step &
+ Focus now disable joystick input during automated moves and re-enable
+ it after. Verified against hardware with `test_joystick_override.py`
+ (requires stage on COM3). NOTE: the joystick pot itself still needs
+ cleaning/recentering — until then the stage creeps in X during manual
+ navigation.
 - Stage "lost position" / corner check way off (fixed in stage-loss-fix):
   torn serial reads let a truncated `WHERE` reply (e.g. `:A 103` from
   `:A 103800 -141191`) be parsed as a valid position. Driver now rejects

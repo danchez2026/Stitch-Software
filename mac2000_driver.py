@@ -26,6 +26,7 @@ Simulated mode (no hardware needed):
 
 import re
 import serial
+import serial.tools.list_ports
 import time
 import logging
 from dataclasses import dataclass
@@ -112,6 +113,23 @@ class MAC2000:
     POST_OPEN_DELAY = 0.5       # Wait after opening port
     STATUS_POLL_INTERVAL = 0.1  # 100ms between status polls
 
+    # USB-serial adapter used with the MAC 2000 (FTDI FT232)
+    ADAPTER_VID = 0x0403
+    ADAPTER_PID = 0x6001
+
+    @classmethod
+    def find_stage_port(cls) -> Optional[str]:
+        """
+        Find the COM port of the stage's FTDI USB-serial adapter.
+        Returns the device name (e.g. 'COM3') or None if not present.
+        Windows can renumber the port after an unplug/replug or when a
+        different USB socket is used, so never assume it is still COM3.
+        """
+        for port in serial.tools.list_ports.comports():
+            if port.vid == cls.ADAPTER_VID and port.pid == cls.ADAPTER_PID:
+                return port.device
+        return None
+
     def __init__(
         self,
         port: str,
@@ -130,6 +148,7 @@ class MAC2000:
 
         self._serial: Optional[serial.Serial] = None
         self._connected = False
+        self._last_reconnect_attempt = 0.0
 
         # Simulation state
         self._sim_pos = StagePosition(0, 0)
@@ -139,15 +158,38 @@ class MAC2000:
 
     # ─── Connection Management ────────────────────────────────────────
 
-    def connect(self) -> str:
+    def connect(self, require_handshake: bool = True) -> str:
         """
-        Open serial connection to the MAC 2000.
+        Open serial connection to the MAC 2000 and verify it responds.
+
+        Parameters
+        ----------
+        require_handshake : bool
+            If True (default), raise CommunicationError when the port opens
+            but the controller does not answer the version handshake.
+            An open COM port only proves the USB adapter is present — NOT
+            that the stage is powered and listening. Treating that state as
+            "connected" is how the GUI used to report 'Stage: COM3 OK' on a
+            dead stage.
+
         Returns the firmware version string if successful.
         """
         if self.simulate:
             self._connected = True
             logger.info("MAC 2000 connected (SIMULATED)")
             return "MAC2000 SIMULATED"
+
+        # The adapter can re-enumerate on a different COM number after an
+        # unplug/replug. If the configured port is gone but the adapter is
+        # found elsewhere, follow it.
+        available = [p.device for p in serial.tools.list_ports.comports()]
+        if self.port not in available:
+            detected = self.find_stage_port()
+            if detected:
+                logger.warning(
+                    f"{self.port} not present; stage adapter found on "
+                    f"{detected}, using it")
+                self.port = detected
 
         try:
             self._serial = serial.Serial(
@@ -159,38 +201,68 @@ class MAC2000:
                 timeout=self.timeout,
                 write_timeout=self.timeout,
             )
-            time.sleep(self.POST_OPEN_DELAY)
-
-            # Drain any startup data (loop until quiet — the controller or
-            # a previous session may still be streaming a stale reply)
-            while self._serial.in_waiting:
-                self._serial.read(self._serial.in_waiting)
-                time.sleep(0.05)
-
-            self._connected = True
-            logger.info(f"MAC 2000 connected on {self.port}")
-
-            # Confirm communication; retry once after a resync since the
-            # first exchange after opening the port can hit leftover bytes
-            for attempt in range(2):
-                try:
-                    version = self.get_version()
-                    logger.info(f"Firmware: {version}")
-                    return version
-                except Exception as e:
-                    logger.warning(
-                        f"Version read attempt {attempt + 1} failed: {e}")
-                    self._resync()
-            logger.warning("Connected but could not read version")
-            return "Connected (version unknown)"
-
         except serial.SerialException as e:
             raise CommunicationError(f"Failed to open {self.port}: {e}")
 
+        time.sleep(self.POST_OPEN_DELAY)
+
+        # Drain any startup data (loop until quiet — the controller or
+        # a previous session may still be streaming a stale reply)
+        while self._serial.in_waiting:
+            self._serial.read(self._serial.in_waiting)
+            time.sleep(0.05)
+
+        self._connected = True
+        logger.info(f"MAC 2000 connected on {self.port}")
+
+        # Confirm communication; retry once after a resync since the
+        # first exchange after opening the port can hit leftover bytes
+        last_error = None
+        for attempt in range(2):
+            try:
+                version = self.get_version()
+                logger.info(f"Firmware: {version}")
+                return version
+            except Exception as e:
+                last_error = e
+                logger.warning(
+                    f"Version read attempt {attempt + 1} failed: {e}")
+                self._resync()
+
+        if require_handshake:
+            self.disconnect()
+            raise CommunicationError(
+                f"Port {self.port} opened but the MAC 2000 is not "
+                f"responding (is the controller powered on and the serial "
+                f"cable seated?): {last_error}")
+        logger.warning("Connected but could not read version")
+        return "Connected (version unknown)"
+
+    def reconnect(self) -> str:
+        """
+        Tear down and re-establish the serial connection. Used to recover
+        after a USB drop (adapter unplugged/replugged, hub power blip).
+        Re-resolves the COM port in case Windows renumbered it.
+        """
+        logger.info("Attempting reconnect...")
+        self._last_reconnect_attempt = time.time()
+        try:
+            self.disconnect()
+        except Exception:
+            pass
+        time.sleep(0.5)
+        return self.connect(require_handshake=True)
+
     def disconnect(self):
         """Close serial connection."""
-        if self._serial and self._serial.is_open:
-            self._serial.close()
+        if self._serial:
+            try:
+                if self._serial.is_open:
+                    self._serial.close()
+            except (serial.SerialException, OSError) as e:
+                # Port already gone (USB unplugged) — nothing to close
+                logger.debug(f"Close after USB drop: {e}")
+            self._serial = None
         self._connected = False
         logger.info("MAC 2000 disconnected")
 
@@ -347,13 +419,68 @@ class MAC2000:
             If controller returns :N (negative reply)
         CommunicationError
             If no response or communication failure
+
+        Notes
+        -----
+        If the serial port itself dies mid-exchange (USB adapter dropped
+        off the bus — the classic 'stage stopped responding' failure),
+        one automatic reconnect is attempted and, for read-only commands,
+        the command is retried. Motion commands are NOT auto-retried
+        after a reconnect: we cannot know whether the controller already
+        acted on the first send.
         """
         if self.simulate:
             return self._simulate_command(command)
 
         if not self._connected:
-            raise CommunicationError("Not connected")
+            # A previous reconnect may have failed while the USB adapter
+            # was still unplugged. Keep trying (rate-limited) so the
+            # session heals itself once the adapter is back, instead of
+            # staying dead until an app restart.
+            if time.time() - self._last_reconnect_attempt < 2.0:
+                raise CommunicationError("Not connected")
+            self._last_reconnect_attempt = time.time()
+            try:
+                self.reconnect()
+            except Exception as e:
+                raise CommunicationError(f"Not connected (retry failed: {e})")
 
+        try:
+            return self._exchange(command, timeout)
+        except (serial.SerialException, OSError, CommunicationError) as e:
+            if isinstance(e, CommunicationError) and self._port_alive():
+                # Port is fine — a timeout or garbled reply, not a USB drop.
+                # _read_response/_resync already handled the cleanup.
+                raise
+            logger.warning(f"Serial port lost during {command!r}: {e}")
+            try:
+                self.reconnect()
+            except Exception as re_err:
+                self._connected = False
+                raise CommunicationError(
+                    f"Serial port lost ({e}); reconnect failed: {re_err}")
+
+            word = command.split()[0].upper() if command.split() else ""
+            if word in ("WHERE", "STATUS", "VER", "SPEED", "ACCEL",
+                        "RCONFIG", "TRXDEL", "STSPEED") and "=" not in command:
+                logger.info(f"Reconnected; retrying {command!r}")
+                return self._exchange(command, timeout)
+            raise CommunicationError(
+                f"Serial port lost during {command!r}; reconnected, but the "
+                f"command was not retried (not safe for non-query commands)")
+
+    def _port_alive(self) -> bool:
+        """True if the OS still exposes our serial port (USB adapter alive)."""
+        if not self._serial or not self._serial.is_open:
+            return False
+        try:
+            self._serial.in_waiting
+            return True
+        except (serial.SerialException, OSError):
+            return False
+
+    def _exchange(self, command: str, timeout: Optional[float] = None) -> str:
+        """Single TX/RX exchange (no recovery)."""
         logger.debug(f"TX: {command!r}")
         self._send_raw(command + "\r")
 
@@ -596,6 +723,20 @@ class MAC2000:
     def halt(self):
         """Emergency stop - immediately halt all motor movement."""
         self.send_command("HALT")
+
+    def set_joystick(self, enabled: bool):
+        """
+        Enable or disable the physical joystick input for X and Y.
+
+        A mis-centered/dirty joystick pot continuously drives an axis and
+        OVERRIDES serial motion commands on that axis (the controller
+        acknowledges MOVE/MOVREL with :A but never executes the move).
+        Disable the joystick around automated move sequences (corner
+        check, tile scans) and re-enable it afterwards so the user keeps
+        manual navigation.
+        """
+        arg = "+" if enabled else "-"
+        self.send_command(f"JOYSTICK X{arg} Y{arg}")
 
     # ─── Speed & Acceleration ─────────────────────────────────────────
 
