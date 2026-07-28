@@ -37,25 +37,48 @@ from mac2000_driver import MAC2000
 from teli_camera import TeliCamera
 from stitcher import Stitcher
 
-# ─── WILD Stereo Microscope Calibrations ────────────────────────────
-# From DieAnalysisTool/calibrations.js — camera is 2448 × 2048
+# ─── Nikon SMZ1500 Stereo Microscope Calibrations ────────────────────
+# Measured 2026-07-28 in Fiji on grid standards (2.5 mm squares for
+# 0.75x-5x, 1.0 mm squares for 6x-11.25x); source spreadsheet:
+# Z:\Microscopes\WILD\SMZ-Calibration at all mags\SMZ CALS\SMZ Cals.xlsx
+# um_per_pixel = 1000 / px_per_mm. Camera: Teli BU505MCF 2448 x 2048.
+# (Replaces the WILD scope's table - the SMZ1500 now sits on this stand.)
 
 OBJECTIVES = {
-    "<6.3x": {"um_per_pixel": 8.389},
-    "6.3x":  {"um_per_pixel": 8.260},
-    "7x":    {"um_per_pixel": 7.455},
-    "8x":    {"um_per_pixel": 6.553},
-    "10x":   {"um_per_pixel": 5.269},
-    "12.5x": {"um_per_pixel": 4.237},
-    "16x":   {"um_per_pixel": 3.324},
-    "20x":   {"um_per_pixel": 2.668},
-    "25x":   {"um_per_pixel": 2.139},
-    "32x":   {"um_per_pixel": 1.671},
-    ">32x":  {"um_per_pixel": 1.660},
+    "0.75x":  {"um_per_pixel": 7.6923, "px_per_mm": 130.0},
+    "1x":     {"um_per_pixel": 5.7604, "px_per_mm": 173.6},
+    "2x":     {"um_per_pixel": 2.8918, "px_per_mm": 345.8},
+    "3x":     {"um_per_pixel": 1.9410, "px_per_mm": 515.2},
+    "4x":     {"um_per_pixel": 1.4543, "px_per_mm": 687.6},
+    "5x":     {"um_per_pixel": 1.1617, "px_per_mm": 860.8},
+    "6x":     {"um_per_pixel": 0.9606, "px_per_mm": 1041.0},
+    "7x":     {"um_per_pixel": 0.8230, "px_per_mm": 1215.0},
+    "8x":     {"um_per_pixel": 0.7218, "px_per_mm": 1385.5},
+    "9x":     {"um_per_pixel": 0.6421, "px_per_mm": 1557.5},
+    "10x":    {"um_per_pixel": 0.5769, "px_per_mm": 1733.5},
+    "11.25x": {"um_per_pixel": 0.5086, "px_per_mm": 1966.0},
 }
 
 CAMERA_WIDTH_PX = 2448
 CAMERA_HEIGHT_PX = 2048
+
+# ─── Magnification-scaled scan speed ─────────────────────────────────
+# Automated tile moves used a fixed 50,000 pulses/s, tuned on the old
+# scope at ~2 um/px. The SMZ1500 spans 0.51-7.7 um/px, so scale the
+# speed with pixel size: at high zoom the FOV (and tile step) shrinks
+# and the stage must move gently for clean settling; at low zoom the
+# steps are many mm and can safely run faster. Clamped to a proven-safe
+# window (the stage accepts 85 - 2,764,800 pulses/s; ~2.5 pulses/um).
+SCAN_SPEED_REF_PPS = 50_000     # worked well at ~2.0 um/px
+SCAN_SPEED_REF_UM_PER_PX = 2.0
+SCAN_SPEED_MIN_PPS = 15_000
+SCAN_SPEED_MAX_PPS = 100_000
+
+
+def scan_speed_for(um_per_pixel: float) -> int:
+    """Stage speed (pulses/s) for automated scan moves at a given mag."""
+    s = SCAN_SPEED_REF_PPS * (um_per_pixel / SCAN_SPEED_REF_UM_PER_PX)
+    return int(min(max(s, SCAN_SPEED_MIN_PPS), SCAN_SPEED_MAX_PPS))
 
 # ─── Histogram / Clipping Detection ────────────────────────────────
 # 12-bit data left-shifted to 16-bit: max = 4095 << 4 = 65520
@@ -418,7 +441,7 @@ class TileScanGUI:
         settings.pack(fill=tk.X)
 
         ttk.Label(settings, text="Objective:", style="Dark.TLabel").grid(row=0, column=0, sticky=tk.W)
-        self.obj_var = tk.StringVar(value="20x")
+        self.obj_var = tk.StringVar(value="5x")
         ttk.Combobox(settings, textvariable=self.obj_var,
                       values=list(OBJECTIVES.keys()),
                       state="readonly", width=8).grid(row=0, column=1, padx=5, sticky=tk.W)
@@ -1751,10 +1774,13 @@ class TileScanGUI:
         self.root.after(0, self._init_mosaic, params)
         time.sleep(0.3)
 
-        # Set scan speed; disable joystick so a drifting pot can't
-        # override the serial MOVE commands mid-scan
+        # Set magnification-scaled scan speed; disable joystick so a
+        # drifting pot can't override the serial MOVE commands mid-scan
         try:
-            self.stage.set_speed(50000)
+            speed = scan_speed_for(params["um_per_pixel"])
+            print(f"[STEP&FOCUS] Scan speed {speed} pulses/s "
+                  f"({params['um_per_pixel']:.3f} um/px)")
+            self.stage.set_speed(speed)
             time.sleep(0.1)
             self.stage.set_joystick(False)
         except Exception:
@@ -2083,11 +2109,14 @@ class TileScanGUI:
         self.root.after(0, self._init_mosaic, params)
         time.sleep(0.3)  # let mosaic render
 
-        # Set scan speed — not too fast to avoid serial issues.
-        # Disable joystick so a drifting pot can't override the serial
-        # MOVE commands mid-scan.
+        # Set magnification-scaled scan speed — not too fast to avoid
+        # serial issues. Disable joystick so a drifting pot can't
+        # override the serial MOVE commands mid-scan.
         try:
-            self.stage.set_speed(50000)
+            speed = scan_speed_for(params["um_per_pixel"])
+            print(f"[SCAN] Scan speed {speed} pulses/s "
+                  f"({params['um_per_pixel']:.3f} um/px)")
+            self.stage.set_speed(speed)
             time.sleep(0.1)
             self.stage.set_joystick(False)
         except Exception:
