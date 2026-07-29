@@ -365,7 +365,10 @@ class TeliCamera:
         # (overridable via camera_config.json)
         cfg = _load_camera_config()
         models = cfg.get("accepted_models") or DEFAULT_ACCEPTED_MODELS
-        self.accepted_models = tuple(str(m) for m in models)
+        if isinstance(models, str):        # tolerate a bare string in the json
+            models = [models]
+        models = [str(m) for m in models if str(m).strip()]
+        self.accepted_models = tuple(models) or DEFAULT_ACCEPTED_MODELS
         self.preferred_serial = str(cfg.get("preferred_serial") or "")
 
     def connect(self) -> str:
@@ -877,12 +880,17 @@ class TeliCamera:
                     str(f).startswith("Bayer") and "12" in str(f)
                     for f in avail_fmts
                 )
-                # Rank: preferred serial / accepted-model order first;
-                # unreadable model with 12-bit Bayer support beats an
-                # unrecognized camera but loses to any real model match
+                # Rank: preferred serial / accepted-model order first.
+                # A camera whose model name pytelicam CANNOT read but that
+                # supports 12-bit Bayer ranks between the first- and
+                # second-listed models (0.5): it is more likely the scope
+                # camera than a readable second-priority (retired) model,
+                # but loses to a readable first-priority match. Set
+                # preferred_serial in camera_config.json to disambiguate
+                # definitively when multiple cameras are attached.
                 rank = self._camera_rank(model, serial)
                 if rank >= self._RANK_UNRECOGNIZED and not model and has_bayer12:
-                    rank = 50
+                    rank = 0.5
                 print(f"  Camera {idx}: Model={model}, Serial={serial}, "
                       f"Formats={avail_fmts}, "
                       f"Bayer12={'YES' if has_bayer12 else 'NO'}, "
