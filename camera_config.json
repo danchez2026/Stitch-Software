@@ -1,0 +1,5 @@
+{
+    "_note": "Camera identification for teli_camera.py. accepted_models: model-name substrings recognized as the microscope camera (checked in order of listing). preferred_serial: if set, a camera with this exact serial number wins over any model match; leave empty to match by model only.",
+    "accepted_models": ["BU505MCG", "BU505MCF"],
+    "preferred_serial": ""
+}

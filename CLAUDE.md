@@ -5,7 +5,10 @@ Automated tile scanning system for semiconductor die imaging on the WILD stereo 
 
 ## Hardware
 - **Stage:** Ludl MAC2000, serial COM3, ~2.5 steps/um
-- **Camera:** Teli BU505MC, 2448x2048, RGB, 8-bit or 12-bit (BayerGR12)
+- **Camera:** Teli BU505MCG (swapped from BU505MCF 2026-07-29; same 3.45 um
+  pixel pitch, calibrations unchanged), 2448x2048, RGB, 8-bit or 12-bit.
+  Accepted models live in `camera_config.json` — it is a USB3 Vision
+  device, NOT a serial/COM device (COM3 is the stage only)
 - **Microscope:** WILD stereo with objectives from <6.3x to >32x
 
 ## Key Files
