@@ -42,8 +42,8 @@ from stitcher import Stitcher
 # 0.75x-5x, 1.0 mm squares for 6x-11.25x); source spreadsheet:
 # Z:\Microscopes\WILD\SMZ-Calibration at all mags\SMZ CALS\SMZ Cals.xlsx
 # um_per_pixel = 1000 / px_per_mm. Camera: Teli BU505MCF 2448 x 2048.
-# (BU505MCG swap 2026-07-29: same 3.45 um pixel pitch and resolution
-# as the MCF, so these calibrations carry over unchanged.)
+# (BU505MCG is also supported: same 3.45 um pixel pitch and resolution
+# as the MCF, so these calibrations apply to either camera.)
 # (Replaces the WILD scope's table - the SMZ1500 now sits on this stand.)
 
 MICROSCOPE_NAME = "SMZ1500"

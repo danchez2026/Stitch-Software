@@ -51,7 +51,7 @@ CAMERA_CONFIG_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "camera_config.json"
 )
 
-DEFAULT_ACCEPTED_MODELS = ("BU505MCG", "BU505MCF")
+DEFAULT_ACCEPTED_MODELS = ("BU505MCF", "BU505MCG")
 
 
 def _load_camera_config() -> dict:
@@ -433,7 +433,7 @@ class TeliCamera:
     def _try_open_camera(self, api, cam_indices):
         """Try to open and stream from one of the given camera indices.
         Prioritizes the preferred serial (if configured), then accepted
-        models in their camera_config.json order (BU505MCG before BU505MCF
+        models in their camera_config.json order (BU505MCF before BU505MCG
         by default). Returns (cam, genicam, strm, max_payload) on success,
         or raises RuntimeError."""
         last_error = None
