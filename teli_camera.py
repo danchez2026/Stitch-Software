@@ -1,14 +1,18 @@
 """
-Toshiba Teli BU505MCF Camera Driver
+Toshiba Teli BU505 Camera Driver
 =====================================
-Python interface for the Toshiba Teli BU505MCF USB3 Vision camera.
+Python interface for the Toshiba Teli BU505MCF / BU505MCG USB3 Vision cameras.
 
 Camera specs:
-  - Model: BU505MCF (type BU0536A2)
-  - Sensor: Sony IMX250 (2/3" global shutter CMOS)
+  - Models: BU505MCF (Sony IMX250) and BU505MCG (Sony IMX264)
+  - Both: 2/3" global shutter CMOS, 3.45 um pixels, so um/px
+    calibrations carry over unchanged between the two models
   - Resolution: 2448 x 2048 (5 Megapixel)
-  - Interface: USB3 Vision
-  - Color: Yes (MCF = Mono/Color with Filter)
+  - Interface: USB3 Vision (NOT a serial/COM device)
+  - Color: Yes
+
+Which model(s) are accepted is governed by camera_config.json
+("accepted_models" list, "preferred_serial" string) next to this file.
 
 Requires TeliCamSDK to be installed:
   Download from: https://www.toshiba-teli.co.jp/en/products/industrial-camera/software-telicamsdk.htm
@@ -30,6 +34,7 @@ Usage:
 """
 
 import ctypes
+import json
 import os
 import time
 import logging
@@ -39,6 +44,25 @@ from typing import Optional, Tuple
 import numpy as np
 
 logger = logging.getLogger(__name__)
+
+# ─── Camera Identification Config ─────────────────────────────────────
+
+CAMERA_CONFIG_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "camera_config.json"
+)
+
+DEFAULT_ACCEPTED_MODELS = ("BU505MCF", "BU505MCG")
+
+
+def _load_camera_config() -> dict:
+    """Load camera_config.json; missing/broken file falls back to defaults."""
+    try:
+        with open(CAMERA_CONFIG_PATH, "r") as f:
+            return json.load(f)
+    except Exception as e:
+        if os.path.exists(CAMERA_CONFIG_PATH):
+            logger.warning(f"camera_config.json unreadable ({e}); using defaults")
+        return {}
 
 # Default TeliCamSDK install paths
 TELI_SDK_PATHS = [
@@ -278,7 +302,8 @@ class _TeliNativeAPI:
 
 class TeliCamera:
     """
-    Unified camera driver for the Toshiba Teli BU505MCF.
+    Unified camera driver for the Toshiba Teli BU505MCF / BU505MCG
+    (accepted models configurable in camera_config.json).
 
     Automatically selects the best available backend:
     1. pytelicam (official SDK Python wheel)
@@ -336,6 +361,16 @@ class TeliCamera:
         self.model = ""
         self.serial = ""
 
+        # Which camera model(s)/serial identify the microscope camera
+        # (overridable via camera_config.json)
+        cfg = _load_camera_config()
+        models = cfg.get("accepted_models") or DEFAULT_ACCEPTED_MODELS
+        if isinstance(models, str):        # tolerate a bare string in the json
+            models = [models]
+        models = [str(m) for m in models if str(m).strip()]
+        self.accepted_models = tuple(models) or DEFAULT_ACCEPTED_MODELS
+        self.preferred_serial = str(cfg.get("preferred_serial") or "")
+
     def connect(self) -> str:
         """
         Connect to the camera using the best available backend.
@@ -380,18 +415,32 @@ class TeliCamera:
 
     # ─── Native Backend ───────────────────────────────────────────
 
-    # WILD microscope camera identification
-    WILD_CAMERA_SERIAL = "0510129"
-    WILD_CAMERA_MODEL = "BU505MCF"  # MCF model, not MCG
+    # Selection ranks (lower wins): preferred serial beats any model match;
+    # model matches rank by their position in accepted_models, so the
+    # first-listed model (the camera currently on the scope) is chosen
+    # even when a retired camera is still plugged into the PC.
+    _RANK_PREFERRED_SERIAL = -1
+    _RANK_UNRECOGNIZED = 900
+
+    def _camera_rank(self, model: str, serial: str) -> int:
+        if self.preferred_serial and serial == self.preferred_serial:
+            return self._RANK_PREFERRED_SERIAL
+        for i, m in enumerate(self.accepted_models):
+            if m in model:
+                return i
+        return self._RANK_UNRECOGNIZED
 
     def _try_open_camera(self, api, cam_indices):
         """Try to open and stream from one of the given camera indices.
-        Prioritizes matching WILD_CAMERA_SERIAL if found.
-        Returns (cam, genicam, strm, max_payload) on success, or raises RuntimeError."""
+        Prioritizes the preferred serial (if configured), then accepted
+        models in their camera_config.json order (BU505MCF before BU505MCG
+        by default). Returns (cam, genicam, strm, max_payload) on success,
+        or raises RuntimeError."""
         last_error = None
         locked_indices = []
         wrong_serial = []
-        fallback = None  # (cam, genicam, strm, max_payload) for non-matching camera
+        fallback = None  # (cam, genicam, strm, max_payload, cam_idx) best so far
+        fallback_rank = None
 
         for cam_idx in cam_indices:
             print(f"\n--- Trying camera index {cam_idx} ---")
@@ -423,6 +472,7 @@ class TeliCamera:
 
             # Check serial number if GenICam available
             serial = ""
+            model = "unknown"
             if genicam:
                 buf = ctypes.create_string_buffer(256)
                 buf_len = ctypes.c_uint32(256)
@@ -455,52 +505,53 @@ class TeliCamera:
                 last_error = f"Strm_OpenSimple failed on camera {cam_idx}"
                 continue
 
-            # Stream opened! Check if this is the WILD camera
-            is_wild = False
-            if serial == self.WILD_CAMERA_SERIAL and serial:
-                print(f"  Camera {cam_idx}: WILD camera (S/N {serial}) — using this one!")
-                is_wild = True
-            elif self.WILD_CAMERA_MODEL and model and self.WILD_CAMERA_MODEL in model:
-                print(f"  Camera {cam_idx}: Model matches WILD ({model})")
-                is_wild = True
+            # Stream opened! Rank this camera against what we have so far
+            rank = self._camera_rank(model, serial)
+            if rank == self._RANK_PREFERRED_SERIAL:
+                print(f"  Camera {cam_idx}: preferred serial (S/N {serial}) — using this one!")
+            elif rank < self._RANK_UNRECOGNIZED:
+                print(f"  Camera {cam_idx}: Model matches microscope camera "
+                      f"({model}, priority {rank + 1} of {len(self.accepted_models)})")
             else:
                 if serial:
                     wrong_serial.append(f"cam{cam_idx}={serial}")
-                print(f"  Camera {cam_idx}: Not WILD model (got {model}, want {self.WILD_CAMERA_MODEL})")
+                print(f"  Camera {cam_idx}: Unrecognized model (got {model}, "
+                      f"want one of {'/'.join(self.accepted_models)})")
 
-            if is_wild:
-                # Prefer this camera, but keep looking for exact serial match
-                if fallback is None:
-                    fallback = (cam, genicam, strm, max_payload, cam_idx)
-                else:
-                    # Already have a fallback MCF — close previous, keep latest
+            if fallback is None or rank < fallback_rank:
+                if fallback is not None:
                     prev_cam, prev_gc, prev_strm, prev_mp, prev_idx = fallback
                     api.Strm_Stop(prev_strm)
                     api.Strm_Close(prev_strm)
                     api.Cam_Close(prev_cam)
-                    fallback = (cam, genicam, strm, max_payload, cam_idx)
+                fallback = (cam, genicam, strm, max_payload, cam_idx)
+                fallback_rank = rank
+                if rank == self._RANK_PREFERRED_SERIAL:
+                    break  # exact serial match — no need to keep looking
             else:
-                # Wrong model — close it, only use as last resort
-                if fallback is None:
-                    fallback = (cam, genicam, strm, max_payload, cam_idx)
-                else:
-                    api.Strm_Stop(strm)
-                    api.Strm_Close(strm)
-                    api.Cam_Close(cam)
+                # Not better than what we already hold — close it
+                api.Strm_Stop(strm)
+                api.Strm_Close(strm)
+                api.Cam_Close(cam)
 
-        # WILD camera not found by serial — report clearly
+        # Microscope camera not found — report clearly
         if locked_indices:
             print(f"\n  WARNING: Camera(s) {locked_indices} locked by other software.")
-            print(f"  The WILD camera (S/N {self.WILD_CAMERA_SERIAL}) may be among them.")
-            print(f"  Close other microscope software to free the WILD camera.")
+            print(f"  The microscope camera ({'/'.join(self.accepted_models)}) "
+                  f"may be among them.")
+            print(f"  Close other microscope software to free the camera.")
 
         if fallback is not None:
             cam, genicam, strm, max_payload, idx = fallback
-            print(f"\n  Using camera {idx} as fallback (not confirmed as WILD camera)")
+            if fallback_rank >= self._RANK_UNRECOGNIZED:
+                print(f"\n  Using camera {idx} as fallback "
+                      f"(not confirmed as microscope camera)")
+            else:
+                print(f"\n  Using camera {idx}")
             return cam, genicam, strm, max_payload
 
         raise RuntimeError(
-            f"WILD camera (S/N {self.WILD_CAMERA_SERIAL}) not available. "
+            f"Microscope camera ({'/'.join(self.accepted_models)}) not available. "
             f"Locked cameras: {locked_indices}. Other serials found: {wrong_serial}"
         )
 
@@ -593,10 +644,10 @@ class TeliCamera:
 
         # Try to read model/serial via GenApi if available
         if self._native_genicam:
-            self.model = self._native_get_str(b"DeviceModelName") or "BU505MC"
+            self.model = self._native_get_str(b"DeviceModelName") or self.accepted_models[0]
             self.serial = self._native_get_str(b"DeviceSerialNumber") or ""
         else:
-            self.model = "BU505MC"
+            self.model = self.accepted_models[0]
             self.serial = ""
 
         self._backend_name = "native"
@@ -793,10 +844,11 @@ class TeliCamera:
 
         print(f"Found {cam_num} Teli camera(s) via pytelicam")
 
-        # Find the WILD camera (BU505MCF) — identify by BayerBG12 support
-        # since pytelicam can't reliably read model names
+        # Find the microscope camera — match accepted model names
+        # (BU505MCG/BU505MCF) when readable; pytelicam can't always read
+        # model names, so 12-bit Bayer support is kept as a fallback tell
         device = None
-        wild_idx = None
+        wild_rank = None
         for idx in range(cam_num):
             try:
                 dev = self._pytelicam_system.create_device_object(idx)
@@ -824,27 +876,46 @@ class TeliCamera:
                 except Exception:
                     pass
 
-                has_bayer_bg12 = "BayerBG12" in avail_fmts
+                has_bayer12 = any(
+                    str(f).startswith("Bayer") and "12" in str(f)
+                    for f in avail_fmts
+                )
+                # Rank: preferred serial / accepted-model order first.
+                # A camera whose model name pytelicam CANNOT read but that
+                # supports 12-bit Bayer ranks between the first- and
+                # second-listed models (0.5): it is more likely the scope
+                # camera than a readable second-priority (retired) model,
+                # but loses to a readable first-priority match. Set
+                # preferred_serial in camera_config.json to disambiguate
+                # definitively when multiple cameras are attached.
+                rank = self._camera_rank(model, serial)
+                if rank >= self._RANK_UNRECOGNIZED and not model and has_bayer12:
+                    rank = 0.5
                 print(f"  Camera {idx}: Model={model}, Serial={serial}, "
-                      f"Formats={avail_fmts}, BayerBG12={'YES' if has_bayer_bg12 else 'NO'}")
+                      f"Formats={avail_fmts}, "
+                      f"Bayer12={'YES' if has_bayer12 else 'NO'}, "
+                      f"Rank={rank}")
 
-                # Prefer camera with BayerBG12 support (that's the MCF/WILD camera)
-                if has_bayer_bg12 and wild_idx is None:
+                if device is None or rank < wild_rank:
                     if device is not None:
                         device.close()
                     device = dev
-                    wild_idx = idx
-                    self.model = model or "BU505MCF"
+                    wild_rank = rank
+                    if model:
+                        self.model = model
+                    elif rank < self._RANK_UNRECOGNIZED:
+                        self.model = self.accepted_models[0]
+                    else:
+                        self.model = "Teli Camera"
                     self.serial = serial
-                    print(f"  -> Using camera {idx} (supports BayerBG12)")
-                elif device is None:
-                    device = dev
-                    self.model = model or "Teli Camera"
-                    self.serial = serial
+                    print(f"  -> Camera {idx} is current best candidate")
                 else:
                     dev.close()
             except Exception as e:
                 print(f"  Camera {idx}: open failed: {e}")
+
+        if device is not None and wild_rank >= self._RANK_UNRECOGNIZED:
+            print(f"  WARNING: using unrecognized camera (Model={self.model})")
 
         if device is None:
             self._pytelicam_system.terminate()
@@ -1110,7 +1181,7 @@ class TeliCamera:
         self._simulate = True
         self.width = self._sim_width
         self.height = self._sim_height
-        self.model = "BU505MCF (SIMULATED)"
+        self.model = f"{self.accepted_models[0]} (SIMULATED)"
         self.serial = "SIM-0510129"
         self._backend_name = "simulate"
         self._connected = True
